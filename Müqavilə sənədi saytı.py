@@ -447,14 +447,19 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
 
+from http.server import BaseHTTPRequestHandler
+app = Handler
+
 def main():
     OUTPUT_DIR.mkdir(exist_ok=True)
     UPLOAD_DIR.mkdir(exist_ok=True)
     port = int(os.environ.get("PORT", 8765))
+    from http.server import ThreadingHTTPServer
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print("Sayt hazırdır: http://127.0.0.1:8765")
+    print(f"Sayt hazırdır: http://127.0.0.1:{port}")
     server.serve_forever()
 
+app = Handler
 
 if __name__ == "__main__":
     main()
