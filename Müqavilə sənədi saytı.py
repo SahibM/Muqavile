@@ -16,9 +16,26 @@ from urllib.parse import parse_qs
 import xml.etree.ElementTree as ET
 
 APP_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = APP_DIR / "generated"
-UPLOAD_DIR = APP_DIR / "uploads"
-DEFAULT_TEMPLATE = Path.home() / "Downloads" / "Yusubov Elxan Yusif 0526 nümunə.docx"
+
+# Vercel-de fayl sistemi YALNIZ /tmp qovluguna yazila biler (read-only deployment bundle).
+# tempfile.gettempdir() lokalda da, Vercel-de de isleyir.
+OUTPUT_DIR = Path(tempfile.gettempdir()) / "generated"
+UPLOAD_DIR = Path(tempfile.gettempdir()) / "uploads"
+
+# Numune Word fayli GitHub repo-ya "templates" qovluguna qoyulmalidir (Path.home()/Downloads
+# Vercel serverinde movcud deyil -- server senin lokal kompyuterine cixis ede bilmir).
+TEMPLATE_DIR = APP_DIR / "templates"
+
+
+def find_default_template():
+    if TEMPLATE_DIR.exists():
+        docs = sorted(TEMPLATE_DIR.glob("*.docx"))
+        if docs:
+            return docs[0]
+    return None
+
+
+DEFAULT_TEMPLATE = find_default_template()
 
 NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 ET.register_namespace("w", NS["w"])
@@ -221,7 +238,7 @@ def replace_in_text(text, data):
 
 
 def update_docx(template, output, data):
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         with zipfile.ZipFile(template) as zf:
@@ -314,14 +331,15 @@ def form_html(data=None, message="", error=""):
         status = f'<div class="panel success"><p class="note">{message}</p></div>'
     if error:
         status = f'<div class="panel error"><p>{html.escape(error)}</p></div>'
-    template_note = "Tapıldı" if DEFAULT_TEMPLATE.exists() else "Tapılmadı, aşağıdan nümunə Word seç"
+    template_note = "Tapıldı" if DEFAULT_TEMPLATE and DEFAULT_TEMPLATE.exists() else "Tapılmadı, aşağıdan nümunə Word seç"
+    template_path_label = str(DEFAULT_TEMPLATE) if DEFAULT_TEMPLATE else "templates/ qovluğunda .docx tapılmadı"
     return page("Word Müqavilə Forması", f"""
 {status}
 <form method="post" enctype="multipart/form-data" action="/generate">
   <aside>
     <div class="panel">
       <h2>Nümunə Word</h2>
-      <p class="note">Default: {html.escape(str(DEFAULT_TEMPLATE))}<br>Status: {template_note}</p>
+      <p class="note">Default: {html.escape(template_path_label)}<br>Status: {template_note}</p>
       <label><span>Başqa nümunə seç</span><input type="file" name="template" accept=".docx"></label>
     </div>
     <div class="panel">
@@ -401,7 +419,7 @@ class Handler(BaseHTTPRequestHandler):
     def save_upload(self, item, fallback):
         if item is None or not getattr(item, "filename", ""):
             return fallback
-        UPLOAD_DIR.mkdir(exist_ok=True)
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         safe = Path(item.filename).name
         target = UPLOAD_DIR / safe
         target.write_bytes(item.data)
@@ -435,31 +453,44 @@ class Handler(BaseHTTPRequestHandler):
             data = self.collect_data(form)
             try:
                 template = self.save_upload(form["template"] if "template" in form else None, DEFAULT_TEMPLATE)
-                if not template.exists():
-                    raise RuntimeError("Nümunə Word faylı tapılmadı. Formadan .docx seç.")
+                if not template or not template.exists():
+                    raise RuntimeError(
+                        "Nümunə Word faylı tapılmadı. Ya formadan .docx seç, ya da GitHub repo-da "
+                        "'templates' qovluğuna nümunə Word faylını əlavə et."
+                    )
+                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
                 output = OUTPUT_DIR / "hazir_muqavile.docx"
                 update_docx(template, output, data)
-                link = f'<a class="button" href="/download/{html.escape(output.name)}">Word faylını endir</a>'
-                self.send_html(form_html(data, f'Hazırdır: {link}'))
+                # Faylı birbaşa cavab kimi göndəririk (Vercel-də hər sorğu fərqli, müvəqqəti
+                # konteynerdə işləyə bilər deyə diskdə saxlayıb ayrıca /download sorğusuna
+                # güvənmək etibarsızdır).
+                file_bytes = output.read_bytes()
+                self.send_response(200)
+                self.send_header(
+                    "Content-Type",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+                self.send_header("Content-Disposition", 'attachment; filename="hazir_muqavile.docx"')
+                self.send_header("Content-Length", str(len(file_bytes)))
+                self.end_headers()
+                self.wfile.write(file_bytes)
             except Exception as exc:
                 self.send_html(form_html(data, error=str(exc)))
             return
         self.send_error(404)
 
 
-from http.server import BaseHTTPRequestHandler
-app = Handler
+app = Handler  # Vercel (legacy @vercel/python builder) bu dəyişəni axtarır
+
 
 def main():
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    UPLOAD_DIR.mkdir(exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     port = int(os.environ.get("PORT", 8765))
-    from http.server import ThreadingHTTPServer
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Sayt hazırdır: http://127.0.0.1:{port}")
     server.serve_forever()
 
-app = Handler
 
 if __name__ == "__main__":
     main()
